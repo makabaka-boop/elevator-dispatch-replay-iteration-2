@@ -67,4 +67,66 @@ describe('TimelinePlayer speed and jumping consistency', () => {
     expect(get(player.current)).toBe(result.ticks[6]);
     player.destroy();
   });
+
+  it('jumps across outage and recovery frames and always reads the same frozen snapshot', () => {
+    const outageScenario: Scenario = {
+      floors: 8,
+      elevators: 3,
+      travelTicks: 3,
+      doorOpenTicks: 2,
+      doorCloseTicks: 2,
+      requests: [
+        { id: 'A', arrivalTick: 0, origin: 1, destination: 7, people: 5 },
+        { id: 'B', arrivalTick: 1, origin: 3, destination: 1, people: 3 }
+      ],
+      carEvents: [
+        { carId: 0, tick: 4, type: 'outage' },
+        { carId: 0, tick: 9, type: 'recover' },
+        { carId: 1, tick: 6, type: 'outage' },
+        { carId: 1, tick: 10, type: 'recover' }
+      ]
+    };
+
+    const result = simulate(outageScenario);
+    const player = new TimelinePlayer(result.ticks);
+
+    // Jump forward into the frozen window: the snapshot is the exact precomputed frame.
+    player.jumpTo(6);
+    expect(get(player.current)).toBe(result.ticks[6]);
+    const frozen0 = result.ticks[6].cars[0];
+    expect(frozen0.outOfService).toBe(true);
+    const frozen1 = result.ticks[6].cars[1];
+    expect(frozen1.outOfService).toBe(true);
+
+    // Every frozen tick for car 0 (outage tick through the tick before recovery) holds the
+    // identical floor/phase/elapsed/onboard values.
+    for (let tick = 4; tick <= 8; tick++) {
+      const car = result.ticks[tick].cars[0];
+      expect(car.floor).toBe(frozen0.floor);
+      expect(car.phase).toBe(frozen0.phase);
+      expect(car.phaseElapsed).toBe(frozen0.phaseElapsed);
+      expect(car.peopleOnboard).toBe(frozen0.peopleOnboard);
+    }
+
+    // Jump backward before the outage, forward past recovery, and back to the frozen frame:
+    // references remain identical, playback never recomputes state.
+    player.jumpTo(2);
+    expect(get(player.current)).toBe(result.ticks[2]);
+    expect(result.ticks[2].cars[0].outOfService).toBe(false);
+    player.jumpTo(11);
+    expect(get(player.current)).toBe(result.ticks[11]);
+    expect(result.ticks[11].cars[0].outOfService).toBe(false);
+    player.jumpTo(6);
+    expect(get(player.current)).toBe(result.ticks[6]);
+    expect(get(player.events)).toBe(result.ticks[6].events);
+    expect(result.ticks[6].events.some((event) => event.type === 'car_outage' && event.carId === 1)).toBe(true);
+
+    // Frame-by-frame stepping forward from the frozen window visits stored snapshots in order.
+    player.jumpTo(8);
+    player.stepForward();
+    expect(get(player.currentTick)).toBe(9);
+    expect(get(player.current)).toBe(result.ticks[9]);
+    expect(result.ticks[9].events.some((event) => event.type === 'car_recover' && event.carId === 0)).toBe(true);
+    player.destroy();
+  });
 });

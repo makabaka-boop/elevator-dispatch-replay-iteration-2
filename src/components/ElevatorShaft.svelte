@@ -38,10 +38,17 @@
         {#each snapshot.cars as car}
           <div class="lane" class:service={car.floor === floor}>
             {#if car.floor === floor}
-              <div class="car" class:open={car.phase === 'open'} class:moving={car.phase === 'moving'}>
+              <div
+                class="car"
+                class:open={car.phase === 'open'}
+                class:moving={car.phase === 'moving'}
+                class:frozen={car.outOfService}
+                title={car.outOfService ? `自 tick ${car.outageTick} 起临时停运：冻结位置与门相位` : ''}
+              >
                 <div class="car-head">
                   <span>#{car.id}</span>
-                  <span class="phase">{doorLabel[car.phase]}</span>
+                  {#if car.outOfService}<span class="outage-badge">停运</span>{/if}
+                  <span class="phase">{car.outOfService ? '冻结' : doorLabel[car.phase]}</span>
                 </div>
                 <div class="people">
                   {#each Array.from({ length: car.capacity }, (_, index) => index) as index}
@@ -134,6 +141,21 @@
 
   .car.moving {
     border-color: #c084fc;
+  }
+
+  .car.frozen {
+    border-color: #f87171;
+    background: linear-gradient(180deg, rgba(127, 29, 29, 0.45), rgba(15, 23, 42, 0.94));
+    box-shadow: 0 0 20px rgba(248, 113, 113, 0.4);
+    opacity: 0.92;
+  }
+
+  .outage-badge {
+    color: #fecaca;
+    background: rgba(127, 29, 29, 0.85);
+    border: 1px solid #ef4444;
+    border-radius: 999px;
+    padding: 0 0.3rem;
   }
 
   .car-head {

@@ -6,6 +6,7 @@ import {
   MIN_CARS,
   MIN_FLOORS,
   type Scenario,
+  type ValidatedCarEvent,
   type ValidatedRequest,
   type ValidatedScenario
 } from './types';
@@ -25,6 +26,9 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
   const doorOpenTicks = input?.doorOpenTicks;
   const doorCloseTicks = input?.doorCloseTicks;
   const requests = Array.isArray(input?.requests) ? input!.requests : null;
+  const rawCarEvents = input?.carEvents;
+  const carEventsProvided = rawCarEvents !== undefined && rawCarEvents !== null;
+  const carEventsList = Array.isArray(rawCarEvents) ? rawCarEvents : null;
 
   if (!isFiniteInteger(floors) || floors < MIN_FLOORS || floors > MAX_FLOORS) {
     errors.push(`楼层数必须是 ${MIN_FLOORS} 到 ${MAX_FLOORS} 的整数。`);
@@ -109,6 +113,74 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
     });
   }
 
+  if (carEventsProvided && !carEventsList) {
+    errors.push('carEvents 必须是数组。');
+  }
+
+  const carCount = isFiniteInteger(elevators) ? elevators : 0;
+  const validCarEvents: ValidatedCarEvent[] = [];
+
+  if (carEventsList) {
+    const seenCarTicks = new Set<string>();
+
+    // Collect structurally valid events first; the alternation rule is evaluated in canonical
+    // (carId, tick) order so it does not depend on the input array order.
+    const parsedEvents: Array<{ carId: number; tick: number; type: 'outage' | 'recover' }> = [];
+
+    carEventsList.forEach((raw, index) => {
+      const prefix = `轿厢事件 #${index + 1}`;
+      if (!raw || typeof raw !== 'object') {
+        errors.push(`${prefix}: 事件必须是包含 carId、tick、type 的对象。`);
+        return;
+      }
+
+      const carId = raw.carId;
+      const eventTick = raw.tick;
+      const type = raw.type;
+      let validCarId: number | null = null;
+      let validTick: number | null = null;
+
+      if (!isFiniteInteger(carId) || carId < 0 || carId >= carCount) {
+        errors.push(`${prefix}: carId 必须是 0 到 ${(carCount || MAX_CARS) - 1} 之间的整数。`);
+      } else {
+        validCarId = carId;
+      }
+      if (!isFiniteInteger(eventTick) || eventTick < 0) {
+        errors.push(`${prefix}: tick 必须是非负整数。`);
+      } else {
+        validTick = eventTick;
+      }
+      if (type !== 'outage' && type !== 'recover') {
+        errors.push(`${prefix}: type 必须是 'outage' 或 'recover'。`);
+      }
+
+      if (validCarId !== null && validTick !== null) {
+        const key = `${validCarId}@${validTick}`;
+        if (seenCarTicks.has(key)) {
+          errors.push(`${prefix}: 轿厢 #${validCarId} 在 tick ${validTick} 存在重复事件。`);
+        }
+        seenCarTicks.add(key);
+
+        if (type === 'outage' || type === 'recover') {
+          parsedEvents.push({ carId: validCarId, tick: validTick, type });
+        }
+      }
+    });
+
+    const carInOutage = new Map<number, boolean>();
+    for (const event of [...parsedEvents].sort((a, b) => a.carId - b.carId || a.tick - b.tick)) {
+      const currentlyOut = carInOutage.get(event.carId) ?? false;
+      if (event.type === 'outage' && currentlyOut) {
+        errors.push(`轿厢事件: 轿厢 #${event.carId} 在 tick ${event.tick} 已处于停运状态，需先恢复。`);
+      }
+      if (event.type === 'recover' && !currentlyOut) {
+        errors.push(`轿厢事件: 轿厢 #${event.carId} 在 tick ${event.tick} 未停运，无法恢复。`);
+      }
+      carInOutage.set(event.carId, event.type === 'outage');
+      validCarEvents.push(event);
+    }
+  }
+
   if (errors.length > 0) {
     throw new Error(errors.join('\n'));
   }
@@ -125,7 +197,13 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
       .map((request, index) => ({
         ...request,
         id: request.id || `R${String(index + 1).padStart(3, '0')}`
-      }))
+      })),
+    // Deterministic same-tick order: arrivals/cancels first, then cars by ID, outage before recover.
+    carEvents: validCarEvents
+      .sort(
+        (a, b) =>
+          a.tick - b.tick || a.carId - b.carId || a.type.localeCompare(b.type)
+      )
   };
 
   return { ok: true, value: scenario };

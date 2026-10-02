@@ -20,6 +20,19 @@ export interface ScenarioRequest {
   cancelTick?: number | null;
 }
 
+/** 'outage' freezes the car; 'recover' resumes it from the frozen phase. */
+export type CarEventType = 'outage' | 'recover';
+
+export interface ScenarioCarEvent {
+  carId: number;
+  tick: number;
+  type: CarEventType;
+}
+
+export interface ValidatedCarEvent extends ScenarioCarEvent {
+  type: CarEventType;
+}
+
 export interface Scenario {
   floors: number;
   elevators: number;
@@ -27,6 +40,8 @@ export interface Scenario {
   doorOpenTicks: number;
   doorCloseTicks: number;
   requests: ScenarioRequest[];
+  /** Optional per-tick outage/recover events. Sorted by tick, carId, type after validation. */
+  carEvents?: ScenarioCarEvent[];
 }
 
 export interface ValidatedRequest extends ScenarioRequest {
@@ -41,6 +56,7 @@ export interface ValidatedScenario {
   doorOpenTicks: number;
   doorCloseTicks: number;
   requests: ValidatedRequest[];
+  carEvents: ValidatedCarEvent[];
 }
 
 export interface CarRequest {
@@ -62,6 +78,10 @@ export interface ElevatorRuntime {
   committedPickups: string[];
   movementTickStarted: number | null;
   idleLogged: boolean;
+  /** Frozen cars skip every tick transition until a matching recover event. */
+  outOfService: boolean;
+  /** Tick at which the current outage began (null while in service). */
+  outageTick: number | null;
 }
 
 export interface RequestRuntime {
@@ -83,6 +103,7 @@ export interface RequestRuntime {
 export type SimEventType =
   | 'arrival'
   | 'dispatch'
+  | 'dispatch_deferred'
   | 'door_opening'
   | 'door_open'
   | 'door_closing'
@@ -93,6 +114,8 @@ export type SimEventType =
   | 'move_arrive'
   | 'cancel'
   | 'cancel_rejected'
+  | 'car_outage'
+  | 'car_recover'
   | 'idle';
 
 export interface SimEvent {
@@ -118,6 +141,8 @@ export interface SimEvent {
   dropOffs?: number[];
   reason?: string;
   peopleOnboard?: number;
+  /** Pickup commitments withdrawn when the assigned car went out of service. */
+  withdrawn?: Array<{ requestId: string; people: number }>;
 }
 
 export interface TickRequestView {
@@ -144,6 +169,8 @@ export interface TickCarView {
   phaseElapsed: number;
   peopleOnboard: number;
   capacity: number;
+  outOfService: boolean;
+  outageTick: number | null;
   waiting: Array<{ requestId: string; remaining: number }>;
   onboard: Array<{ requestId: string; remaining: number }>;
   attempted: string[];
@@ -158,6 +185,8 @@ export interface TickSnapshot {
   events: SimEvent[];
   active: boolean;
   totalWaiting: number;
+  /** Not-yet-boarded people whose assigned car was withdrawn and no car is available. */
+  totalUnassigned: number;
   totalRiding: number;
   totalCompleted: number;
   totalCancelled: number;

@@ -4,7 +4,7 @@
   import { simulate } from './engine/simulation';
   import type { SimulationResult } from './engine/types';
   import { TimelinePlayer } from './player/TimelinePlayer';
-  import { sampleScenario, stressScenario } from './sample';
+  import { sampleScenario, stressScenario, outageScenario } from './sample';
 
   let scenarioText = JSON.stringify(sampleScenario, null, 2);
   let result: SimulationResult | null = null;
@@ -37,6 +37,10 @@
     scenarioText = JSON.stringify(stressScenario, null, 2);
   }
 
+  function loadOutage(): void {
+    scenarioText = JSON.stringify(outageScenario, null, 2);
+  }
+
   onDestroy(() => player?.destroy());
 </script>
 
@@ -58,11 +62,13 @@
         <p class="small">
           参数：travelTicks（行驶一层）、doorOpenTicks（开门耗时）、doorCloseTicks（关门耗时）。
           门全开瞬间完成上下客并立即关门，未关门前不能行驶。
-          可给请求设置 cancelTick 取消未上车部分。
+          可给请求设置 cancelTick 取消未上车部分；可用 carEvents（carId/tick/type=outage|recover）
+          指定按 tick 生效的停运与恢复，事件在该 tick 派车与轿厢推进前处理。
         </p>
       </div>
       <div class="editor-actions">
         <button on:click={loadSample}>样例</button>
+        <button on:click={loadOutage}>停运样例</button>
         <button on:click={loadStress}>压测样例</button>
         <button class="primary" on:click={runSimulation}>计算并生成时间线</button>
       </div>

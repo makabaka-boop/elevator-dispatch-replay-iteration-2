@@ -15,6 +15,7 @@
 <div class="request-panel">
   <div class="summary">
     <div><strong>{snapshot.totalWaiting}</strong><span>等待</span></div>
+    <div><strong>{snapshot.totalUnassigned}</strong><span>无车等待</span></div>
     <div><strong>{snapshot.totalRiding}</strong><span>轿厢中</span></div>
     <div><strong>{snapshot.totalCompleted}</strong><span>完成</span></div>
     <div><strong>{snapshot.totalCancelled}</strong><span>取消</span></div>
@@ -47,7 +48,16 @@
             <td>{Math.max(0, request.boarded - request.completed)}</td>
             <td>{request.completed}</td>
             <td>{request.cancelled}</td>
-            <td>{request.carId === null ? '—' : `#${request.carId}`}</td>
+            <td>
+              {#if request.carId === null && request.remaining > 0 &&
+                  (request.status === 'waiting' || request.status === 'riding')}
+                <span class="unassigned" title="承诺已撤回或暂无可用电梯，将在后续 tick 重新派车">无车</span>
+              {:else if request.carId === null}
+                —
+              {:else}
+                #{request.carId}
+              {/if}
+            </td>
             <td><span class="status">{statusLabel[request.status]}</span></td>
           </tr>
         {/each}
@@ -66,7 +76,7 @@
 
   .summary {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     border-bottom: 1px solid #243044;
   }
 
@@ -135,6 +145,16 @@
     border-radius: 999px;
     padding: 0.12rem 0.48rem;
     background: #334155;
+    font-size: 0.74rem;
+    font-weight: 800;
+  }
+
+  .unassigned {
+    border-radius: 999px;
+    padding: 0.12rem 0.48rem;
+    background: rgba(251, 146, 60, 0.18);
+    color: #fdba74;
+    border: 1px solid #f97316;
     font-size: 0.74rem;
     font-weight: 800;
   }

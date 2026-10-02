@@ -39,12 +39,14 @@
       <ElevatorShaft snapshot={$current} floors={result.scenario.floors} />
       <div class="car-grid">
         {#each $current.cars as car}
-          <article class="car-card">
-            <h3># {car.id} · {car.floor}F · {car.phase}</h3>
+          <article class="car-card" class:frozen={car.outOfService}>
+            <h3>
+              # {car.id} · {car.floor}F · {car.outOfService ? `停运（tick ${car.outageTick} 起冻结 ${car.phase}）` : car.phase}
+            </h3>
             <dl>
               <div><dt>载重</dt><dd>{car.peopleOnboard}/{car.capacity}</dd></div>
               <div><dt>方向</dt><dd>{car.direction === 1 ? '上行' : car.direction === -1 ? '下行' : '停'}</dd></div>
-              <div><dt>接客层</dt><dd>{car.committedPickupFloors.join(', ') || '—'}</dd></div>
+              <div><dt>接客层</dt><dd>{car.outOfService ? '承诺已撤回' : car.committedPickupFloors.join(', ') || '—'}</dd></div>
               <div><dt>下客层</dt><dd>{car.committedDropFloors.join(', ') || '—'}</dd></div>
               <div><dt>余客请求</dt><dd>{car.waiting.map((item) => item.requestId).join(', ') || '—'}</dd></div>
             </dl>
@@ -97,6 +99,11 @@
     background: rgba(30, 41, 59, 0.65);
     border-radius: 0.75rem;
     padding: 0.75rem;
+  }
+
+  .car-card.frozen {
+    border-color: #b91c1c;
+    background: rgba(69, 10, 10, 0.4);
   }
 
   dl {

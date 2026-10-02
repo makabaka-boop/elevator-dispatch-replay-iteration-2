@@ -46,7 +46,9 @@ function initialCar(id: number): ElevatorRuntime {
     attempted: [],
     committedPickups: [],
     movementTickStarted: null,
-    idleLogged: false
+    idleLogged: false,
+    outOfService: false,
+    outageTick: null
   };
 }
 
@@ -186,7 +188,13 @@ function transferPassengers(
     const people = entry.remaining;
     car.onboard = car.onboard.filter((item) => item.requestId !== request.id);
     request.completed += people;
-    if (request.remaining > 0) {
+    if (request.boarded - request.completed > 0) {
+      // Some boarded passengers are still inside a car (possibly a different car after an
+      // outage re-dispatch); keep riding until the last onboard group arrives.
+      request.status = 'riding';
+    } else if (request.remaining > 0) {
+      // The boarded part was delivered but an unboarded residual remains. It keeps its commitment
+      // to this same car (which returns for it); carId and the waiting entry are intentionally kept.
       request.status = 'waiting';
     } else {
       request.status = 'completed';
@@ -386,8 +394,9 @@ function stepCar(
   let dryResult: string | null = null;
 
   if (car.phase === 'opening') {
-    car.phaseElapsed += 1;
-    if (car.phaseElapsed >= scenario.doorOpenTicks) {
+    // A car may resume mid-phase after an outage; the completion test consumes the frozen
+    // remaining duration rather than replaying the already elapsed ticks.
+    if (car.phaseElapsed + 1 >= scenario.doorOpenTicks) {
       car.phaseElapsed = 0;
       const loadBefore = carLoad(car);
       dryResult = transferPassengers(car, context);
@@ -410,13 +419,14 @@ function stepCar(
         peopleOnboard: carLoad(car),
         message: `#${car.id} 在 ${car.floor} 层开始关门，关门耗时 ${scenario.doorCloseTicks} tick。`
       });
+    } else {
+      car.phaseElapsed += 1;
     }
     return dryResult;
   }
 
   if (car.phase === 'closing') {
-    car.phaseElapsed += 1;
-    if (car.phaseElapsed >= scenario.doorCloseTicks) {
+    if (car.phaseElapsed + 1 >= scenario.doorCloseTicks) {
       car.phase = 'closed';
       car.phaseElapsed = 0;
       emit(context.events, {
@@ -428,13 +438,15 @@ function stepCar(
         message: `#${car.id} 在 ${car.floor} 层门已关闭；只有关门后才能行驶。`
       });
       actFromFloor(car, context, scenario);
+    } else {
+      car.phaseElapsed += 1;
     }
     return dryResult;
   }
 
   if (car.phase === 'moving') {
-    car.phaseElapsed += 1;
-    if (car.phaseElapsed >= scenario.travelTicks) {
+    // Resuming a frozen move consumes only the remaining travelTicks; no distance is invented.
+    if (car.phaseElapsed + 1 >= scenario.travelTicks) {
       const from = car.floor;
       car.floor = car.targetFloor ?? car.floor;
       car.phase = 'closed';
@@ -458,6 +470,8 @@ function stepCar(
         message: `#${car.id} 用时 ${scenario.travelTicks} tick 从 ${from} 层到达 ${car.floor} 层；${willStop ? '停靠开门' : '继续下一停靠点'}。`
       });
       actFromFloor(car, context, scenario);
+    } else {
+      car.phaseElapsed += 1;
     }
     return null;
   }
@@ -524,18 +538,44 @@ function assignRequest(
   state: RuntimeState,
   request: RequestRuntime,
   scenario: ValidatedScenario,
-  tick: number
+  tick: number,
+  reassignReason?: { withdrawnFromCar: number }
 ): void {
   const requestMap = new Map(state.requests.map((item) => [item.id, item]));
+  // Out-of-service cars are frozen and must not receive new commitments.
+  const availableCars = state.cars.filter((car) => !car.outOfService);
   const candidates = state.cars.map((car) => ({
     carId: car.id,
-    eta: earliestPickupEta(car, request, requestMap, scenario, tick),
+    eta: car.outOfService
+      ? null
+      : earliestPickupEta(car, request, requestMap, scenario, tick),
     floor: car.floor,
     phase: car.phase,
     load: carLoad(car)
   }));
 
-  const selected = [...candidates].sort((a, b) => a.eta - b.eta || a.carId - b.carId)[0];
+  if (availableCars.length === 0) {
+    // Requests are never cancelled by a fleet outage; they keep waiting until a car recovers.
+    request.carId = null;
+    request.assignedTick = null;
+    emit(state.events, {
+      tick,
+      requestId: request.id,
+      type: 'dispatch_deferred',
+      floor: request.origin,
+      remaining: request.remaining,
+      candidates,
+      reason:
+        '没有可用电梯（全部停运），未上车乘客继续等待，不作取消；待任一电梯恢复后于后续 tick 重新派车。',
+      message:
+        `请求 ${request.id}（${request.origin}→${request.destination}，剩余 ${request.remaining} 人）本 tick 无可用电梯，继续等待。`
+    });
+    return;
+  }
+
+  const selected = [...candidates]
+    .filter((candidate) => candidate.eta !== null)
+    .sort((a, b) => (a.eta ?? 0) - (b.eta ?? 0) || a.carId - b.carId)[0];
   const car = state.cars.find((item) => item.id === selected.carId)!;
   request.carId = car.id;
   request.assignedTick = tick;
@@ -543,20 +583,29 @@ function assignRequest(
   car.idleLogged = false;
   syncCommittedPickups(car);
 
+  const reassignNote = reassignReason
+    ? `（原派电梯 #${reassignReason.withdrawnFromCar} 停运，承诺撤回后重新派车）`
+    : '';
   emit(state.events, {
     tick,
     carId: car.id,
     requestId: request.id,
     type: 'dispatch',
-    eta: selected.eta,
+    eta: selected.eta ?? undefined,
     candidates,
     floor: request.origin,
     reason:
       `按已承诺停靠点分别推演最早开门接客时刻；最小 ETA=${selected.eta}，` +
-      `ETA 相同则选择电梯 ID 最小者。候选：${candidates
-        .map((candidate) => `#${candidate.carId}@${candidate.floor}层/${candidate.phase}/ETA${candidate.eta}`)
+      `ETA 相同则选择电梯 ID 最小者；停运电梯不参与候选。候选：${candidates
+        .map((candidate) =>
+          candidate.eta === null
+            ? `#${candidate.carId}@${candidate.floor}层/${candidate.phase}/停运`
+            : `#${candidate.carId}@${candidate.floor}层/${candidate.phase}/ETA${candidate.eta}`
+        )
         .join('，')}`,
-    message: `请求 ${request.id}（${request.origin}→${request.destination}，${request.remaining} 人）派给 #${car.id}；最早可接客 tick=${selected.eta}。`
+    message:
+      `请求 ${request.id}（${request.origin}→${request.destination}，${request.remaining} 人）派给 #${car.id}；` +
+      `最早可接客 tick=${selected.eta}。${reassignNote}`
   });
 }
 
@@ -597,7 +646,8 @@ function cancelUnboarded(state: RuntimeState, request: RequestRuntime, tick: num
 
   request.cancelled += cancelledPeople;
   request.remaining = 0;
-  if (request.boarded > 0) {
+  if (request.boarded - request.completed > 0) {
+    // Some boarded passengers are still inside a car; the request stays 'riding' for them.
     request.status = 'riding';
   } else {
     request.status = 'cancelled';
@@ -613,10 +663,87 @@ function cancelUnboarded(state: RuntimeState, request: RequestRuntime, tick: num
     peopleOnboard: request.boarded - request.completed,
     reason: '仅取消尚未上车的乘客；已上车部分继续运送',
     message:
-      request.boarded > 0
+      request.boarded - request.completed > 0
         ? `请求 ${request.id} 取消 ${cancelledPeople} 名未上车乘客；已上车 ${request.boarded - request.completed} 人继续乘坐。`
         : `请求 ${request.id} 取消 ${cancelledPeople} 名未上车乘客，请求从等待队列移除。`
   });
+}
+
+function applyCarEvents(state: RuntimeState, scenario: ValidatedScenario, tick: number): void {
+  const events = scenario.carEvents.filter((event) => event.tick === tick);
+  for (const event of events) {
+    const car = state.cars.find((item) => item.id === event.carId);
+    if (!car) continue; // validation guarantees the car exists
+
+    if (event.type === 'outage') {
+      car.outOfService = true;
+      car.outageTick = tick;
+      car.idleLogged = false;
+
+      // Boarded passengers and their destination commitments stay frozen; every not-yet-boarded
+      // commitment is withdrawn and becomes eligible for re-dispatch to other cars.
+      const withdrawn: Array<{ requestId: string; people: number }> = [];
+      for (const entry of [...car.waiting]) {
+        const request = state.requests.find((item) => item.id === entry.requestId)!;
+        const people = Math.min(entry.remaining, request.remaining);
+        withdrawn.push({ requestId: request.id, people });
+        if (request.boarded - request.completed > 0) {
+          // Partially boarded requests keep 'riding' (people are still inside this frozen car).
+          request.status = 'riding';
+        } else {
+          request.status = 'waiting';
+        }
+        request.carId = null;
+        request.assignedTick = null;
+      }
+      car.waiting = [];
+      car.attempted = [];
+      syncCommittedPickups(car);
+
+      const load = carLoad(car);
+      const drops = dropFloors(car, new Map(state.requests.map((r) => [r.id, r])));
+      const frozenTarget = car.targetFloor;
+      emit(state.events, {
+        tick,
+        carId: car.id,
+        type: 'car_outage',
+        floor: car.floor,
+        fromFloor: car.floor,
+        toFloor: frozenTarget ?? undefined,
+        peopleOnboard: load,
+        committedPickups: [],
+        dropOffs: drops,
+        withdrawn,
+        reason:
+          `冻结位置 ${car.floor} 层、门相位 ${car.phase}（已耗时 ${car.phaseElapsed} tick）；` +
+          `已上车 ${load} 人与下客承诺 [${drops.join(', ') || '无'}] 保留，` +
+          `未上车承诺 [${withdrawn.map((item) => `${item.requestId}:${item.people}人`).join('，') || '无'}] ` +
+          `撤回后按其他可用车重新计算 ETA；停运期间不补行路程。`,
+        message:
+          `#${car.id} 在 tick ${tick} 临时停运：冻结于 ${car.floor} 层（${car.phase}），` +
+          `车内 ${load} 名乘客保留；撤回 ${withdrawn.length} 个未上车承诺。`
+      });
+    } else {
+      car.outOfService = false;
+      car.outageTick = null;
+      car.idleLogged = false;
+      const load = carLoad(car);
+      emit(state.events, {
+        tick,
+        carId: car.id,
+        type: 'car_recover',
+        floor: car.floor,
+        toFloor: car.targetFloor ?? undefined,
+        peopleOnboard: load,
+        reason:
+          `从冻结相位 ${car.phase}（已耗时 ${car.phaseElapsed} tick）继续，不补走停运期间路程；` +
+          `本 tick 先参与派车，随后再推进轿厢。`,
+        message:
+          `#${car.id} 在 tick ${tick} 恢复运行：仍在 ${car.floor} 层，相位 ${car.phase}，` +
+          `车内 ${load} 名乘客，重新参与派车。`
+      });
+    }
+  }
 }
 
 function makeSnapshot(
@@ -638,6 +765,8 @@ function makeSnapshot(
       phaseElapsed: car.phaseElapsed,
       peopleOnboard: carLoad(car),
       capacity: CAR_CAPACITY,
+      outOfService: car.outOfService,
+      outageTick: car.outageTick,
       waiting: car.waiting.map((entry) => ({ ...entry })),
       onboard: car.onboard.map((entry) => ({ ...entry })),
       attempted: [...car.attempted],
@@ -662,6 +791,16 @@ function makeSnapshot(
     totalWaiting: state.requests
       .filter((request) => request.status === 'waiting' || request.status === 'riding')
       .reduce((sum, request) => sum + request.remaining, 0),
+    totalUnassigned: state.requests
+      .filter(
+        (request) =>
+          (request.status === 'waiting' || request.status === 'riding') &&
+          request.remaining > 0 &&
+          !state.cars.some((car) =>
+            car.waiting.some((entry) => entry.requestId === request.id)
+          )
+      )
+      .reduce((sum, request) => sum + request.remaining, 0),
     totalRiding: state.requests
       .filter((request) => request.status === 'riding')
       .reduce((sum, request) => sum + Math.max(0, request.boarded - request.completed), 0),
@@ -675,9 +814,28 @@ function isFinished(state: RuntimeState): boolean {
     (request) => request.status === 'pending' || request.status === 'waiting' || request.status === 'riding'
   );
   if (unfinishedRequest) return false;
-  return state.cars.every(
-    (car) => car.phase === 'closed' && car.onboard.length === 0 && car.waiting.length === 0
+  // Frozen cars cannot advance without an external recovery event; any onboard passenger would
+  // keep a request in 'riding' above. An empty frozen car therefore never blocks completion, and
+  // no distance is invented for the outage window.
+  return state.cars
+    .filter((car) => !car.outOfService)
+    .every(
+      (car) => car.phase === 'closed' && car.onboard.length === 0 && car.waiting.length === 0
+    );
+}
+
+function outageWithdrawnCar(
+  state: RuntimeState,
+  request: RequestRuntime,
+  tick: number
+): { withdrawnFromCar: number } | undefined {
+  const event = state.events.find(
+    (item) =>
+      item.tick === tick &&
+      item.type === 'car_outage' &&
+      item.withdrawn?.some((entry) => entry.requestId === request.id)
   );
+  return event?.carId !== undefined ? { withdrawnFromCar: event.carId } : undefined;
 }
 
 function processTick(
@@ -710,17 +868,34 @@ function processTick(
     }
   }
 
-  // Dispatch every not-yet-assigned live request before updating cars. Same-tick ties use
-  // request ID ascending. The selected car sees the new commitment in this tick's transition.
+  // Deterministic order within a tick: arrivals → cancels → outages/recoveries
+  // (sorted by carId, outage before recover) → new dispatch → car transitions.
+  // Outage/recovery therefore applies before this tick's dispatch and car advances.
+  applyCarEvents(state, scenario, tick);
+
+  // Dispatch every not-yet-assigned live request before updating cars. This includes residual
+  // people of a partially boarded request whose car was withdrawn by an outage. Same-tick ties
+  // use arrival tick then request ID ascending. The selected car sees the new commitment in this
+  // tick's transition; if every car is frozen the request keeps waiting.
+  const requestMap = new Map(state.requests.map((request) => [request.id, request]));
+  // A live request is unassigned only when no car still holds a not-yet-boarded commitment for it.
+  const committedIds = new Set(state.cars.flatMap((car) => car.waiting.map((entry) => entry.requestId)));
   const unassigned = state.requests
-    .filter((request) => request.status === 'waiting' && request.carId === null)
+    .filter(
+      (request) =>
+        (request.status === 'waiting' || request.status === 'riding') &&
+        request.remaining > 0 &&
+        !committedIds.has(request.id)
+    )
     .sort((a, b) => a.arrivalTick - b.arrivalTick || a.id.localeCompare(b.id, 'zh-CN'));
   for (const request of unassigned) {
-    assignRequest(state, request, scenario, tick);
+    const withdrawnFromCar = outageWithdrawnCar(state, request, tick);
+    assignRequest(state, request, scenario, tick, withdrawnFromCar);
   }
 
-  const requestMap = new Map(state.requests.map((request) => [request.id, request]));
   for (const car of state.cars) {
+    // Frozen cars keep floor, door phase and remaining phase time exactly as they were.
+    if (car.outOfService) continue;
     const context: StepContext = { events: state.events, requestMap, tick };
     stepCar(car, context, scenario);
   }

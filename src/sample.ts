@@ -16,6 +16,31 @@ export const sampleScenario: Scenario = {
   ]
 };
 
+export const outageScenario: Scenario = {
+  floors: 10,
+  elevators: 3,
+  travelTicks: 2,
+  doorOpenTicks: 1,
+  doorCloseTicks: 1,
+  requests: [
+    { id: 'R001', arrivalTick: 0, origin: 1, destination: 8, people: 6 },
+    { id: 'R002', arrivalTick: 0, origin: 1, destination: 4, people: 10 },
+    { id: 'R003', arrivalTick: 2, origin: 3, destination: 9, people: 2 },
+    { id: 'R004', arrivalTick: 6, origin: 6, destination: 2, people: 3 },
+    { id: 'R005', arrivalTick: 8, origin: 10, destination: 1, people: 1 }
+  ],
+  carEvents: [
+    // Car 0 freezes mid-move with 6 onboard; residual R002 people are reassigned.
+    { carId: 0, tick: 4, type: 'outage' },
+    { carId: 0, tick: 9, type: 'recover' },
+    // Whole fleet briefly freezes; R004/R005 keep waiting instead of being cancelled.
+    { carId: 1, tick: 7, type: 'outage' },
+    { carId: 2, tick: 7, type: 'outage' },
+    { carId: 1, tick: 11, type: 'recover' },
+    { carId: 2, tick: 12, type: 'recover' }
+  ]
+};
+
 export const stressScenario: Scenario = {
   floors: 16,
   elevators: 4,
