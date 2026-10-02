@@ -31,7 +31,18 @@ function conservationChecks(ticks: TickSnapshot[]): void {
       0
     );
     const carRiding = snapshot.cars.reduce((sum, car) => sum + car.peopleOnboard, 0);
-    expect(carWaiting).toBe(requestWaiting);
+    const committedIds = new Set(
+      snapshot.cars.flatMap((car) => car.waiting.map((entry) => entry.requestId))
+    );
+    const unassignedWaiting = snapshot.requests
+      .filter(
+        (request) =>
+          (request.status === 'waiting' || request.status === 'riding') &&
+          !committedIds.has(request.id)
+      )
+      .reduce((sum, request) => sum + request.remaining, 0);
+    expect(snapshot.totalUnassignedWaiting).toBe(unassignedWaiting);
+    expect(carWaiting + unassignedWaiting).toBe(requestWaiting);
     expect(carRiding).toBe(requestRiding);
     for (const car of snapshot.cars) {
       expect(car.peopleOnboard).toBeLessThanOrEqual(CAR_CAPACITY);
@@ -242,5 +253,216 @@ describe('discrete elevator reference replay', () => {
     expect(first.finalTick).toBe(second.finalTick);
     expect(second.ticks).toEqual(first.ticks);
     conservationChecks(first.ticks);
+  });
+
+  it('freezes a moving car and resumes without making up the stopped distance', () => {
+    const scenario: Scenario = {
+      floors: 10,
+      elevators: 2,
+      travelTicks: 2,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [
+        { id: 'RIDE', arrivalTick: 0, origin: 1, destination: 5, people: 2 },
+        { id: 'LATE', arrivalTick: 5, origin: 1, destination: 3, people: 1 }
+      ],
+      outageEvents: [
+        { tick: 4, carId: 0, type: 'outage' },
+        { tick: 7, carId: 0, type: 'recovery' }
+      ]
+    };
+
+    const result = simulate(scenario);
+    const outage = result.ticks[4].events.find((event) => event.type === 'outage')!;
+    expect(outage.carId).toBe(0);
+    expect(outage.remainingTicks).toBe(1);
+    expect(result.ticks[4].cars[0]).toMatchObject({
+      floor: 1,
+      phase: 'moving',
+      phaseElapsed: 1,
+      targetFloor: 2,
+      direction: 1,
+      peopleOnboard: 2,
+      outOfService: true
+    });
+
+    for (const tick of [4, 5, 6]) {
+      expect(result.ticks[tick].cars[0]).toMatchObject({
+        floor: 1,
+        phase: 'moving',
+        phaseElapsed: 1,
+        peopleOnboard: 2,
+        outOfService: true
+      });
+    }
+
+    const lateDispatch = findEvent(result, 5, 'LATE', 'dispatch');
+    expect(lateDispatch?.carId).toBe(1);
+    expect(result.ticks[5].requests.find((request) => request.id === 'RIDE')?.carId).toBe(0);
+
+    const recovery = result.ticks[7].events.find((event) => event.type === 'recovery')!;
+    expect(recovery.remainingTicks).toBe(1);
+    // Recovery is applied before the current tick's car transition; the remaining one tick is
+    // consumed normally at tick 7, with no extra movement added for ticks 4-6.
+    expect(result.ticks[7].cars[0]).toMatchObject({
+      floor: 2,
+      phase: 'moving',
+      phaseElapsed: 0,
+      outOfService: false
+    });
+    expect(result.ticks[8].cars[0].floor).toBe(2);
+    expect(result.ticks[9].events.find((event) => event.type === 'move_arrive')?.toFloor).toBe(3);
+    expect(result.ticks[9].cars[0].floor).toBe(3);
+    conservationChecks(result.ticks);
+  });
+
+  it('keeps boarded passengers and destination promises while redispatching a partial pickup', () => {
+    const scenario: Scenario = {
+      floors: 10,
+      elevators: 2,
+      travelTicks: 2,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [
+        { id: 'BIG', arrivalTick: 0, origin: 1, destination: 8, people: 10 },
+        { id: 'OTHER', arrivalTick: 2, origin: 2, destination: 8, people: 2 }
+      ],
+      outageEvents: [
+        { tick: 4, carId: 0, type: 'outage' },
+        { tick: 6, carId: 0, type: 'recovery' }
+      ]
+    };
+
+    const result = simulate(scenario);
+    expect(result.ticks[1].cars[0].peopleOnboard).toBe(6);
+    const requestAtOutage = result.ticks[4].requests.find((request) => request.id === 'BIG')!;
+    expect(requestAtOutage).toMatchObject({
+      boarded: 6,
+      remaining: 4,
+      status: 'riding',
+      carId: 1
+    });
+
+    const withdrawn = findEvent(result, 4, 'BIG', 'commitment_withdrawn')!;
+    expect(withdrawn.carId).toBe(0);
+    expect(withdrawn.people).toBe(4);
+    const frozenCar = result.ticks[4].cars[0];
+    expect(frozenCar).toMatchObject({
+      floor: 1,
+      phase: 'moving',
+      phaseElapsed: 1,
+      peopleOnboard: 6,
+      outOfService: true
+    });
+    expect(frozenCar.waiting).toEqual([]);
+    expect(frozenCar.committedDropFloors).toEqual([8]);
+
+    const redispatch = result.ticks[4].events.find(
+      (event) => event.type === 'dispatch' && event.requestId === 'BIG'
+    );
+    expect(redispatch?.carId).toBe(1);
+    const residualAt4 = result.ticks[4].requests.find((request) => request.id === 'BIG')!;
+    expect(residualAt4.carId).toBe(1);
+    expect(residualAt4.remaining).toBe(4);
+
+    const firstAlight = result.ticks.find((snapshot) =>
+      snapshot.events.some((event) => event.requestId === 'BIG' && event.type === 'alight' && event.people === 6)
+    );
+    expect(firstAlight).toBeDefined();
+    const residualAfterFirst = firstAlight!.requests.find((request) => request.id === 'BIG')!;
+    expect(residualAfterFirst).toMatchObject({ status: 'waiting', remaining: 4, carId: 1 });
+
+    const alights = result.ticks.flatMap((snapshot) =>
+      snapshot.events.filter((event) => event.requestId === 'BIG' && event.type === 'alight')
+    );
+    expect(alights.map((event) => event.people).sort()).toEqual([4, 6]);
+    conservationChecks(result.ticks);
+  });
+
+  it('leaves all passengers waiting when the whole fleet is down, then dispatches after recovery', () => {
+    const scenario: Scenario = {
+      floors: 10,
+      elevators: 3,
+      travelTicks: 2,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [
+        { id: 'A', arrivalTick: 0, origin: 1, destination: 5, people: 2 },
+        { id: 'B', arrivalTick: 0, origin: 2, destination: 5, people: 2 },
+        { id: 'WAIT', arrivalTick: 5, origin: 1, destination: 3, people: 3 }
+      ],
+      outageEvents: [
+        { tick: 5, carId: 0, type: 'outage' },
+        { tick: 5, carId: 1, type: 'outage' },
+        { tick: 5, carId: 2, type: 'outage' },
+        { tick: 6, carId: 0, type: 'recovery' },
+        { tick: 6, carId: 1, type: 'recovery' },
+        { tick: 6, carId: 2, type: 'recovery' }
+      ]
+    };
+
+    const result = simulate(scenario);
+    expect(result.ticks[5].cars.map((car) => car.outOfService)).toEqual([true, true, true]);
+    expect(result.ticks[5].cars).toEqual([
+      expect.objectContaining({ phase: 'moving', phaseElapsed: 0, floor: 2, peopleOnboard: 2 }),
+      expect.objectContaining({ phase: 'moving', phaseElapsed: 0, floor: 2, peopleOnboard: 2 }),
+      expect.objectContaining({ phase: 'closed', phaseElapsed: 0, floor: 1, peopleOnboard: 0 })
+    ]);
+
+    const deferred = findEvent(result, 5, 'WAIT', 'dispatch_deferred');
+    expect(deferred).toBeDefined();
+    const waitingRequest = result.ticks[5].requests.find((request) => request.id === 'WAIT')!;
+    expect(waitingRequest).toMatchObject({
+      status: 'waiting',
+      carId: null,
+      remaining: 3
+    });
+    expect(result.ticks[5].totalUnassignedWaiting).toBe(3);
+
+    const dispatch = findEvent(result, 6, 'WAIT', 'dispatch');
+    expect(dispatch?.carId).toBe(2);
+    expect(result.ticks[5].cars.map((car) => car.floor)).toEqual([2, 2, 1]);
+    expect(result.ticks[6].cars.map((car) => car.floor)).toEqual([2, 2, 1]);
+    expect(result.ticks[5].cars.map((car) => car.phaseElapsed)).toEqual([0, 0, 0]);
+    expect(result.ticks[6].cars.map((car) => car.phaseElapsed)).toEqual([1, 1, 0]);
+    expect(result.ticks[5].cars.map((car) => car.outOfService)).toEqual([true, true, true]);
+    expect(result.ticks[6].cars.map((car) => car.outOfService)).toEqual([false, false, false]);
+    expect(result.ticks[7].cars.map((car) => car.floor)).toEqual([3, 3, 1]);
+    expect(result.ticks[7].cars.map((car) => car.outOfService)).toEqual([false, false, false]);
+    conservationChecks(result.ticks);
+  });
+
+  it('validates deterministic outage transitions and keeps old scenarios unchanged', () => {
+    const base: Scenario = {
+      floors: 5,
+      elevators: 2,
+      travelTicks: 1,
+      doorOpenTicks: 1,
+      doorCloseTicks: 1,
+      requests: [{ id: 'X', arrivalTick: 0, origin: 1, destination: 5, people: 1 }]
+    };
+    const oldResult = simulate(base);
+    const newResult = simulate({ ...base, outageEvents: [] });
+    expect(newResult.ticks).toEqual(oldResult.ticks);
+
+    expect(() => simulate({
+      ...base,
+      outageEvents: [{ tick: 1, carId: 2, type: 'outage' }]
+    })).toThrow('carId');
+    expect(() => simulate({
+      ...base,
+      outageEvents: [{ tick: 1, carId: 0, type: 'recovery' }]
+    })).toThrow('未处于停运状态');
+    expect(() => simulate({
+      ...base,
+      outageEvents: [
+        { tick: 1, carId: 0, type: 'outage' },
+        { tick: 2, carId: 0, type: 'outage' }
+      ]
+    })).toThrow('已处于停运状态');
+    expect(() => simulate({
+      ...base,
+      outageEvents: [{ tick: 1, carId: 0, type: 'outage' }]
+    })).toThrow('对应的恢复事件');
   });
 });

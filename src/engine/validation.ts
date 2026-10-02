@@ -6,6 +6,7 @@ import {
   MIN_CARS,
   MIN_FLOORS,
   type Scenario,
+  type ScenarioOutageEvent,
   type ValidatedRequest,
   type ValidatedScenario
 } from './types';
@@ -25,6 +26,9 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
   const doorOpenTicks = input?.doorOpenTicks;
   const doorCloseTicks = input?.doorCloseTicks;
   const requests = Array.isArray(input?.requests) ? input!.requests : null;
+  const outageInput = input?.outageEvents;
+  const hasOutageEvents = outageInput !== undefined && outageInput !== null;
+  const outageEvents = Array.isArray(outageInput) ? outageInput : null;
 
   if (!isFiniteInteger(floors) || floors < MIN_FLOORS || floors > MAX_FLOORS) {
     errors.push(`楼层数必须是 ${MIN_FLOORS} 到 ${MAX_FLOORS} 的整数。`);
@@ -109,6 +113,70 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
     });
   }
 
+  const carCount = isFiniteInteger(elevators) ? elevators : 0;
+  if (hasOutageEvents && !outageEvents) {
+    errors.push('outageEvents 必须是数组。');
+  }
+
+  const validOutageEvents: ScenarioOutageEvent[] = [];
+  if (outageEvents) {
+    outageEvents.forEach((raw, index) => {
+      const prefix = `停运事件 ${index + 1}`;
+      if (!raw || typeof raw !== 'object') {
+        errors.push(`${prefix}: 必须是包含 tick、carId、type 的对象。`);
+        return;
+      }
+
+      const tickValid = isFiniteInteger(raw.tick) && raw.tick >= 0;
+      const carValid = isFiniteInteger(raw.carId) && raw.carId >= 0 &&
+        (carCount === 0 || raw.carId < carCount);
+      const typeValid = raw.type === 'outage' || raw.type === 'recovery';
+
+      if (!tickValid) errors.push(`${prefix}: tick 必须是非负整数。`);
+      if (!carValid) {
+        errors.push(
+          carCount > 0
+            ? `${prefix}: carId 必须在 0 到 ${carCount - 1} 之间。`
+            : `${prefix}: carId 必须是非负整数且不能超过电梯编号范围。`
+        );
+      }
+      if (!typeValid) errors.push(`${prefix}: type 必须是 outage 或 recovery。`);
+
+      if (tickValid && carValid && typeValid) {
+        validOutageEvents.push({ tick: raw.tick, carId: raw.carId, type: raw.type });
+      }
+    });
+  }
+
+  if (carCount > 0) {
+    const byCar = new Map<number, ScenarioOutageEvent[]>();
+    validOutageEvents
+      .slice()
+      .sort((a, b) => a.tick - b.tick || a.carId - b.carId ||
+        (a.type === b.type ? 0 : a.type === 'outage' ? -1 : 1))
+      .forEach((event) => {
+        const list = byCar.get(event.carId) ?? [];
+        list.push(event);
+        byCar.set(event.carId, list);
+      });
+
+    byCar.forEach((events, carId) => {
+      let outOfService = false;
+      for (const event of events) {
+        if (event.type === 'outage' && outOfService) {
+          errors.push(`电梯 #${carId} 在 tick ${event.tick} 已处于停运状态，不能重复停运。`);
+        }
+        if (event.type === 'recovery' && !outOfService) {
+          errors.push(`电梯 #${carId} 在 tick ${event.tick} 未处于停运状态，不能恢复。`);
+        }
+        outOfService = event.type === 'outage';
+      }
+      if (outOfService) {
+        errors.push(`电梯 #${carId} 的最后一次停运必须有对应的恢复事件。`);
+      }
+    });
+  }
+
   if (errors.length > 0) {
     throw new Error(errors.join('\n'));
   }
@@ -125,7 +193,12 @@ export function validateScenario(input: Partial<Scenario> | null | undefined): {
       .map((request, index) => ({
         ...request,
         id: request.id || `R${String(index + 1).padStart(3, '0')}`
-      }))
+      })),
+    outageEvents: validOutageEvents.slice().sort((a, b) =>
+      a.tick - b.tick ||
+      a.carId - b.carId ||
+      (a.type === b.type ? 0 : a.type === 'outage' ? -1 : 1)
+    )
   };
 
   return { ok: true, value: scenario };

@@ -46,7 +46,9 @@ function initialCar(id: number): ElevatorRuntime {
     attempted: [],
     committedPickups: [],
     movementTickStarted: null,
-    idleLogged: false
+    idleLogged: false,
+    outOfService: false,
+    outageStartedTick: null
   };
 }
 
@@ -64,7 +66,8 @@ function initialRequest(scenario: ValidatedScenario): RequestRuntime[] {
     cancelTick: request.cancelTick,
     status: 'pending',
     carId: null,
-    assignedTick: null
+    assignedTick: null,
+    onboardCarIds: []
   }));
 }
 
@@ -185,9 +188,11 @@ function transferPassengers(
   for (const { entry, request } of alightingAtFloor(car, context.requestMap, car.floor)) {
     const people = entry.remaining;
     car.onboard = car.onboard.filter((item) => item.requestId !== request.id);
+    request.onboardCarIds = request.onboardCarIds.filter((id) => id !== car.id);
     request.completed += people;
-    if (request.remaining > 0) {
-      request.status = 'waiting';
+    const hasPassengersOnAnyCar = request.onboardCarIds.length > 0;
+    if (hasPassengersOnAnyCar || request.remaining > 0) {
+      request.status = hasPassengersOnAnyCar ? 'riding' : 'waiting';
     } else {
       request.status = 'completed';
       request.carId = null;
@@ -221,6 +226,7 @@ function transferPassengers(
       request.boarded += boarding;
       request.status = 'riding';
       car.onboard.push({ requestId: request.id, remaining: boarding });
+      if (!request.onboardCarIds.includes(car.id)) request.onboardCarIds.push(car.id);
       if (entry.remaining === 0) {
         car.waiting = car.waiting.filter((waiting) => waiting.requestId !== request.id);
         car.attempted = car.attempted.filter((id) => id !== request.id);
@@ -385,6 +391,8 @@ function stepCar(
 ): string | null {
   let dryResult: string | null = null;
 
+  if (car.outOfService) return dryResult;
+
   if (car.phase === 'opening') {
     car.phaseElapsed += 1;
     if (car.phaseElapsed >= scenario.doorOpenTicks) {
@@ -527,13 +535,28 @@ function assignRequest(
   tick: number
 ): void {
   const requestMap = new Map(state.requests.map((item) => [item.id, item]));
-  const candidates = state.cars.map((car) => ({
-    carId: car.id,
-    eta: earliestPickupEta(car, request, requestMap, scenario, tick),
-    floor: car.floor,
-    phase: car.phase,
-    load: carLoad(car)
-  }));
+  const availableCars = state.cars.filter((car) => !car.outOfService);
+  if (availableCars.length === 0) {
+    emit(state.events, {
+      tick,
+      requestId: request.id,
+      type: 'dispatch_deferred',
+      floor: request.origin,
+      people: request.remaining,
+      reason: '当前没有可用电梯；未上车乘客继续等待，不会取消',
+      message: `请求 ${request.id} 暂时无可用电梯，${request.remaining} 人继续等待；恢复后再派车。`
+    });
+    return;
+  }
+
+  const candidates = availableCars
+    .map((car) => ({
+      carId: car.id,
+      eta: earliestPickupEta(car, request, requestMap, scenario, tick),
+      floor: car.floor,
+      phase: car.phase,
+      load: carLoad(car)
+    }));
 
   const selected = [...candidates].sort((a, b) => a.eta - b.eta || a.carId - b.carId)[0];
   const car = state.cars.find((item) => item.id === selected.carId)!;
@@ -619,6 +642,113 @@ function cancelUnboarded(state: RuntimeState, request: RequestRuntime, tick: num
   });
 }
 
+function phaseRemainingTicks(
+  car: ElevatorRuntime,
+  scenario: ValidatedScenario
+): number | null {
+  if (car.phase === 'moving') return Math.max(0, scenario.travelTicks - car.phaseElapsed);
+  if (car.phase === 'opening') return Math.max(0, scenario.doorOpenTicks - car.phaseElapsed);
+  if (car.phase === 'closing') return Math.max(0, scenario.doorCloseTicks - car.phaseElapsed);
+  return null;
+}
+
+function applyOutageEvents(
+  state: RuntimeState,
+  scenario: ValidatedScenario,
+  tick: number
+): void {
+  const events = scenario.outageEvents.filter((event) => event.tick === tick);
+
+  for (const outage of events.filter((event) => event.type === 'outage')) {
+    const car = state.cars[outage.carId];
+    if (!car || car.outOfService) continue;
+
+    car.outOfService = true;
+    car.outageStartedTick = tick;
+    const withdrawnPeople = car.waiting.reduce((sum, entry) => sum + entry.remaining, 0);
+    emit(state.events, {
+      tick,
+      carId: car.id,
+      type: 'outage',
+      floor: car.floor,
+      peopleOnboard: carLoad(car),
+      withdrawnPeople,
+      remainingTicks: phaseRemainingTicks(car, scenario) ?? undefined,
+      reason:
+        `冻结位置 ${car.floor} 层、门/行驶相位 ${car.phase} 及剩余耗时；` +
+        `已上车 ${carLoad(car)} 人与目的层承诺保留，未上车 ${withdrawnPeople} 人撤回。`,
+      message:
+        `#${car.id} 在 tick ${tick} 停运，冻结在 ${car.floor} 层（${car.phase}）；` +
+        `车内 ${carLoad(car)} 人保留，${withdrawnPeople} 名未上车乘客撤回并重新参与派车。`
+    });
+
+    for (const entry of [...car.waiting]) {
+      const request = state.requests.find((item) => item.id === entry.requestId);
+      if (!request) continue;
+      const people = entry.remaining;
+      request.assignedTick = null;
+      // A single request may already have passengers on the frozen car while its surplus is
+      // redispatched. The car ID tracks the active waiting commitment; onboard counts remain
+      // explicit in every car snapshot.
+      request.carId = null;
+      const onboardCarIds = state.cars
+        .filter((item) => item.onboard.some((onboard) => onboard.requestId === request.id))
+        .map((item) => item.id);
+      request.status = onboardCarIds.length === 0 ? 'waiting' : 'riding';
+      emit(state.events, {
+        tick,
+        carId: car.id,
+        requestId: request.id,
+        type: 'commitment_withdrawn',
+        floor: car.floor,
+        people,
+        remaining: request.remaining,
+        peopleOnboard: carLoad(car),
+        reason: '停运车只保留已上车乘客及其目的层；未上车承诺撤回，由其他可用车重新计算 ETA',
+        message:
+          `#${car.id} 停运：撤回请求 ${request.id} 的 ${people} 名未上车乘客承诺；` +
+          (onboardCarIds.length === 0
+            ? '当前没有可用承诺时乘客继续等待。'
+            : `已上车部分仍由 ${onboardCarIds.map((id) => `#${id}`).join('、')} 运送。`)
+      });
+    }
+    car.waiting = [];
+    car.attempted = [];
+    syncCommittedPickups(car);
+  }
+
+  for (const recovery of events.filter((event) => event.type === 'recovery')) {
+    const car = state.cars[recovery.carId];
+    if (!car || !car.outOfService) continue;
+
+    car.outOfService = false;
+    car.outageStartedTick = null;
+    emit(state.events, {
+      tick,
+      carId: car.id,
+      type: 'recovery',
+      floor: car.floor,
+      peopleOnboard: carLoad(car),
+      remainingTicks: phaseRemainingTicks(car, scenario) ?? undefined,
+      reason:
+        `从冻结相位 ${car.phase} 继续，不补走停运期间路程；剩余 ${phaseRemainingTicks(car, scenario) ?? 0} tick 后才完成当前相位。`,
+      message:
+        `#${car.id} 在 tick ${tick} 恢复：仍位于 ${car.floor} 层，从冻结的 ${car.phase} 相位继续，` +
+        `不补走停运期间路程，并重新参与派车。`
+    });
+  }
+}
+
+function uncommittedRequests(state: RuntimeState): RequestRuntime[] {
+  const committedIds = new Set(state.cars.flatMap((car) => car.waiting.map((entry) => entry.requestId)));
+  return state.requests.filter(
+    (request) =>
+      request.remaining > 0 &&
+      !committedIds.has(request.id) &&
+      (request.status === 'waiting' || request.status === 'riding')
+  );
+}
+
 function makeSnapshot(
   state: RuntimeState,
   scenario: ValidatedScenario,
@@ -626,6 +756,8 @@ function makeSnapshot(
   active: boolean
 ): TickSnapshot {
   const requestMap = new Map(state.requests.map((request) => [request.id, request]));
+  const totalUnassignedWaiting = uncommittedRequests(state)
+    .reduce((sum, request) => sum + request.remaining, 0);
   return {
     tick,
     active,
@@ -638,6 +770,8 @@ function makeSnapshot(
       phaseElapsed: car.phaseElapsed,
       peopleOnboard: carLoad(car),
       capacity: CAR_CAPACITY,
+      outOfService: car.outOfService,
+      outageStartedTick: car.outageStartedTick,
       waiting: car.waiting.map((entry) => ({ ...entry })),
       onboard: car.onboard.map((entry) => ({ ...entry })),
       attempted: [...car.attempted],
@@ -656,12 +790,14 @@ function makeSnapshot(
       cancelled: request.cancelled,
       cancelTick: request.cancelTick,
       status: request.status,
-      carId: request.carId
+      carId: request.carId,
+      onboardCarIds: [...request.onboardCarIds]
     })),
     events: structuredClone(state.events),
     totalWaiting: state.requests
       .filter((request) => request.status === 'waiting' || request.status === 'riding')
       .reduce((sum, request) => sum + request.remaining, 0),
+    totalUnassignedWaiting,
     totalRiding: state.requests
       .filter((request) => request.status === 'riding')
       .reduce((sum, request) => sum + Math.max(0, request.boarded - request.completed), 0),
@@ -670,14 +806,22 @@ function makeSnapshot(
   };
 }
 
-function isFinished(state: RuntimeState): boolean {
+function isFinished(state: RuntimeState, scenario: ValidatedScenario, tick: number): boolean {
   const unfinishedRequest = state.requests.some(
     (request) => request.status === 'pending' || request.status === 'waiting' || request.status === 'riding'
   );
   if (unfinishedRequest) return false;
-  return state.cars.every(
-    (car) => car.phase === 'closed' && car.onboard.length === 0 && car.waiting.length === 0
-  );
+  return state.cars.every((car) => {
+    if (!car.outOfService) {
+      return car.phase === 'closed' && car.onboard.length === 0 && car.waiting.length === 0;
+    }
+    // A frozen car with retained riders has a pending destination. A car with a future recovery
+    // must also keep participating in the timeline; a permanently parked empty car can end here.
+    const willRecover = scenario.outageEvents.some(
+      (event) => event.type === 'recovery' && event.carId === car.id && event.tick > tick
+    );
+    return car.onboard.length === 0 && car.waiting.length === 0 && !willRecover;
+  });
 }
 
 function processTick(
@@ -710,10 +854,14 @@ function processTick(
     }
   }
 
-  // Dispatch every not-yet-assigned live request before updating cars. Same-tick ties use
+  // Scheduled outages take effect after arrivals/cancellations but before this tick's dispatch
+  // and car transitions. At one tick, all outages precede recoveries; cars are then ordered by ID.
+  applyOutageEvents(state, scenario, tick);
+
+  // Dispatch every not-yet-assigned live request before updating cars. This includes both new
+  // arrivals and commitments withdrawn from a car that became unavailable. Same-tick ties use
   // request ID ascending. The selected car sees the new commitment in this tick's transition.
-  const unassigned = state.requests
-    .filter((request) => request.status === 'waiting' && request.carId === null)
+  const unassigned = uncommittedRequests(state)
     .sort((a, b) => a.arrivalTick - b.arrivalTick || a.id.localeCompare(b.id, 'zh-CN'));
   for (const request of unassigned) {
     assignRequest(state, request, scenario, tick);
@@ -739,13 +887,13 @@ export function simulate(input: Scenario | ValidatedScenario): SimulationResult 
   let finalTick = 0;
   for (let tick = 0; tick <= MAX_SIMULATION_TICKS; tick++) {
     processTick(state, scenario, tick);
-    const finished = isFinished(state);
+    const finished = isFinished(state, scenario, tick);
     finalTick = tick;
     ticks.push(makeSnapshot(state, scenario, tick, !finished));
     if (finished) break;
   }
 
-  if (!isFinished(state)) {
+  if (!isFinished(state, scenario, finalTick)) {
     throw new Error(`仿真在 ${MAX_SIMULATION_TICKS} tick 后仍未结束，请检查场景参数。`);
   }
 

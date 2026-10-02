@@ -17,6 +17,19 @@ const scenario: Scenario = {
   ]
 };
 
+const outageScenario: Scenario = {
+  floors: 6,
+  elevators: 2,
+  travelTicks: 2,
+  doorOpenTicks: 1,
+  doorCloseTicks: 1,
+  requests: [{ id: 'OUT', arrivalTick: 0, origin: 1, destination: 6, people: 1 }],
+  outageEvents: [
+    { tick: 3, carId: 0, type: 'outage' },
+    { tick: 5, carId: 0, type: 'recovery' }
+  ]
+};
+
 function playThrough(speed: number, steps: number) {
   const result = simulate(scenario);
   const player = new TimelinePlayer(result.ticks);
@@ -65,6 +78,30 @@ describe('TimelinePlayer speed and jumping consistency', () => {
     vi.advanceTimersByTime(1000);
     expect(get(player.currentTick)).toBe(6);
     expect(get(player.current)).toBe(result.ticks[6]);
+    player.destroy();
+  });
+
+  it('jumps directly to frozen and recovered outage snapshots without deriving another state', () => {
+    const result = simulate(outageScenario);
+    const player = new TimelinePlayer(result.ticks);
+
+    player.jumpTo(4);
+    const frozen = get(player.current)!;
+    expect(frozen).toBe(result.ticks[4]);
+    expect(frozen.cars[0].outOfService).toBe(true);
+    expect(frozen.cars[0].floor).toBe(1);
+    expect(frozen.cars[0].phaseElapsed).toBe(0);
+    expect(frozen.events.some((event) => event.type === 'outage')).toBe(false);
+
+    player.jumpTo(3);
+    expect(get(player.current)).toBe(result.ticks[3]);
+    expect(get(player.current)!.events.some((event) => event.type === 'outage')).toBe(true);
+
+    player.jumpTo(5);
+    const recovered = get(player.current)!;
+    expect(recovered).toBe(result.ticks[5]);
+    expect(recovered.cars[0].outOfService).toBe(false);
+    expect(recovered.events.some((event) => event.type === 'recovery')).toBe(true);
     player.destroy();
   });
 });

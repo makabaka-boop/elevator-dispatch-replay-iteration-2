@@ -38,9 +38,14 @@
         {#each snapshot.cars as car}
           <div class="lane" class:service={car.floor === floor}>
             {#if car.floor === floor}
-              <div class="car" class:open={car.phase === 'open'} class:moving={car.phase === 'moving'}>
+              <div
+                class="car"
+                class:open={car.phase === 'open'}
+                class:moving={car.phase === 'moving'}
+                class:outage={car.outOfService}
+              >
                 <div class="car-head">
-                  <span>#{car.id}</span>
+                  <span>#{car.id}{car.outOfService ? ' 停运' : ''}</span>
                   <span class="phase">{doorLabel[car.phase]}</span>
                 </div>
                 <div class="people">
@@ -134,6 +139,12 @@
 
   .car.moving {
     border-color: #c084fc;
+  }
+
+  .car.outage {
+    border-color: #f97316;
+    box-shadow: 0 0 20px rgba(249, 115, 22, 0.38);
+    opacity: 0.78;
   }
 
   .car-head {

@@ -40,7 +40,7 @@
       <div class="car-grid">
         {#each $current.cars as car}
           <article class="car-card">
-            <h3># {car.id} · {car.floor}F · {car.phase}</h3>
+            <h3># {car.id} · {car.floor}F · {car.phase}{car.outOfService ? ' · 停运冻结' : ''}</h3>
             <dl>
               <div><dt>载重</dt><dd>{car.peopleOnboard}/{car.capacity}</dd></div>
               <div><dt>方向</dt><dd>{car.direction === 1 ? '上行' : car.direction === -1 ? '下行' : '停'}</dd></div>

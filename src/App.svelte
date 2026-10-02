@@ -58,7 +58,7 @@
         <p class="small">
           参数：travelTicks（行驶一层）、doorOpenTicks（开门耗时）、doorCloseTicks（关门耗时）。
           门全开瞬间完成上下客并立即关门，未关门前不能行驶。
-          可给请求设置 cancelTick 取消未上车部分。
+          可给请求设置 cancelTick 取消未上车部分；也可用 outageEvents 按 tick 指定电梯停运与恢复。
         </p>
       </div>
       <div class="editor-actions">

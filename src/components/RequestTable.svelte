@@ -32,7 +32,8 @@
           <th>车内</th>
           <th>完成</th>
           <th>取消</th>
-          <th>电梯</th>
+          <th>余客派车</th>
+          <th>车内电梯</th>
           <th>状态</th>
         </tr>
       </thead>
@@ -48,6 +49,7 @@
             <td>{request.completed}</td>
             <td>{request.cancelled}</td>
             <td>{request.carId === null ? '—' : `#${request.carId}`}</td>
+            <td>{request.onboardCarIds.length ? request.onboardCarIds.map((id) => `#${id}`).join(',') : '—'}</td>
             <td><span class="status">{statusLabel[request.status]}</span></td>
           </tr>
         {/each}

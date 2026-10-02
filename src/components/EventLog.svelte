@@ -6,6 +6,7 @@
   const typeClass: Record<string, string> = {
     arrival: 'arrival',
     dispatch: 'dispatch',
+    dispatch_deferred: 'dispatch',
     door_opening: 'door',
     door_open: 'door',
     door_closing: 'door',
@@ -16,12 +17,16 @@
     move_arrive: 'move',
     cancel: 'cancel',
     cancel_rejected: 'cancel',
+    outage: 'outage',
+    recovery: 'outage',
+    commitment_withdrawn: 'outage',
     idle: 'idle'
   };
 
   const typeLabel: Record<string, string> = {
     arrival: '到达',
     dispatch: '派车',
+    dispatch_deferred: '等待派车',
     door_opening: '开门',
     door_open: '门开',
     door_closing: '关门',
@@ -32,6 +37,9 @@
     move_arrive: '到达',
     cancel: '取消',
     cancel_rejected: '取消拒绝',
+    outage: '停运',
+    recovery: '恢复',
+    commitment_withdrawn: '撤回承诺',
     idle: '待机'
   };
 </script>
@@ -138,6 +146,7 @@
   .board { border-color: #fbbf24; }
   .alight { border-color: #4ade80; }
   .cancel { border-color: #fb7185; }
+  .outage { border-color: #f97316; }
   .arrival { border-color: #94a3b8; }
   .idle { border-color: #475569; }
 

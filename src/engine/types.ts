@@ -9,6 +9,13 @@ export const DEFAULT_SPEEDS = [1, 2, 4, 8, 16] as const;
 export type RequestStatus = 'pending' | 'waiting' | 'riding' | 'completed' | 'cancelled';
 export type DoorPhase = 'closed' | 'opening' | 'open' | 'closing' | 'moving';
 export type Direction = 1 | -1 | 0;
+export type OutageEventType = 'outage' | 'recovery';
+
+export interface ScenarioOutageEvent {
+  tick: number;
+  carId: number;
+  type: OutageEventType;
+}
 
 export interface ScenarioRequest {
   id?: string;
@@ -27,6 +34,7 @@ export interface Scenario {
   doorOpenTicks: number;
   doorCloseTicks: number;
   requests: ScenarioRequest[];
+  outageEvents?: ScenarioOutageEvent[];
 }
 
 export interface ValidatedRequest extends ScenarioRequest {
@@ -41,6 +49,7 @@ export interface ValidatedScenario {
   doorOpenTicks: number;
   doorCloseTicks: number;
   requests: ValidatedRequest[];
+  outageEvents: ScenarioOutageEvent[];
 }
 
 export interface CarRequest {
@@ -62,6 +71,8 @@ export interface ElevatorRuntime {
   committedPickups: string[];
   movementTickStarted: number | null;
   idleLogged: boolean;
+  outOfService: boolean;
+  outageStartedTick: number | null;
 }
 
 export interface RequestRuntime {
@@ -78,11 +89,13 @@ export interface RequestRuntime {
   status: RequestStatus;
   carId: number | null;
   assignedTick: number | null;
+  onboardCarIds: number[];
 }
 
 export type SimEventType =
   | 'arrival'
   | 'dispatch'
+  | 'dispatch_deferred'
   | 'door_opening'
   | 'door_open'
   | 'door_closing'
@@ -93,6 +106,9 @@ export type SimEventType =
   | 'move_arrive'
   | 'cancel'
   | 'cancel_rejected'
+  | 'outage'
+  | 'recovery'
+  | 'commitment_withdrawn'
   | 'idle';
 
 export interface SimEvent {
@@ -107,6 +123,8 @@ export interface SimEvent {
   people?: number;
   remaining?: number;
   eta?: number;
+  remainingTicks?: number;
+  withdrawnPeople?: number;
   candidates?: Array<{
     carId: number;
     eta: number | null;
@@ -133,6 +151,7 @@ export interface TickRequestView {
   cancelTick: number | null;
   status: RequestStatus;
   carId: number | null;
+  onboardCarIds: number[];
 }
 
 export interface TickCarView {
@@ -144,6 +163,8 @@ export interface TickCarView {
   phaseElapsed: number;
   peopleOnboard: number;
   capacity: number;
+  outOfService: boolean;
+  outageStartedTick: number | null;
   waiting: Array<{ requestId: string; remaining: number }>;
   onboard: Array<{ requestId: string; remaining: number }>;
   attempted: string[];
@@ -158,6 +179,7 @@ export interface TickSnapshot {
   events: SimEvent[];
   active: boolean;
   totalWaiting: number;
+  totalUnassignedWaiting: number;
   totalRiding: number;
   totalCompleted: number;
   totalCancelled: number;

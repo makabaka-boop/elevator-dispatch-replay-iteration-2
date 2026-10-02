@@ -13,6 +13,12 @@ export const sampleScenario: Scenario = {
     { id: 'R004', arrivalTick: 3, origin: 6, destination: 2, people: 8, cancelTick: 30 },
     { id: 'R005', arrivalTick: 4, origin: 1, destination: 10, people: 1 },
     { id: 'R006', arrivalTick: 12, origin: 9, destination: 1, people: 3 }
+  ],
+  outageEvents: [
+    { tick: 10, carId: 0, type: 'outage' },
+    { tick: 12, carId: 0, type: 'recovery' },
+    { tick: 18, carId: 1, type: 'outage' },
+    { tick: 20, carId: 1, type: 'recovery' }
   ]
 };
 
